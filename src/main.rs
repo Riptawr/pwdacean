@@ -1,14 +1,14 @@
 #![forbid(exceeding_bitshifts, mutable_transmutes, no_mangle_const_items,
-unknown_crate_types)]
-#![deny(bad_style, deprecated, improper_ctypes,
+unknown_crate_types, warnings)]
+#![deny(bad_style, deprecated, improper_ctypes, missing_docs,
 non_shorthand_field_patterns, overflowing_literals, plugin_as_library,
 private_no_mangle_fns, private_no_mangle_statics, stable_features, unconditional_recursion,
-unknown_lints, unsafe_code, unused_allocation, unused_attributes,
+unknown_lints, unsafe_code, unused, unused_allocation, unused_attributes,
 unused_comparisons, unused_features, unused_parens, while_true)]
-#![warn(trivial_casts, trivial_numeric_casts, unused_import_braces,
+#![warn(trivial_casts, trivial_numeric_casts, unused_extern_crates, unused_import_braces,
 unused_qualifications, unused_results)]
 #![allow(box_pointers, fat_ptr_transmutes, missing_copy_implementations,
-missing_debug_implementations, variant_size_differences, dead_code, unused_variables)]
+missing_debug_implementations, variant_size_differences)]
 
 #![cfg_attr(feature="clippy", feature(plugin))]
 #![cfg_attr(feature="clippy", plugin(clippy))]
@@ -17,9 +17,9 @@ missing_debug_implementations, variant_size_differences, dead_code, unused_varia
 #[macro_use]
 extern crate log;
 extern crate log4rs;
-extern crate clap;
 extern crate crypto;
 extern crate rand;
+extern crate docopt;
 extern crate futures;
 extern crate maidsafe_utilities;
 extern crate rustc_serialize;
@@ -29,6 +29,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate unwrap;
 
+use docopt::Docopt;
 use futures::{future, Future};
 use maidsafe_utilities::serialisation;
 use self_encryption::{DataMap, SelfEncryptor, Storage, StorageError};
@@ -40,58 +41,83 @@ use std::io::{Read, Write};
 use std::io::Error as IoError;
 use std::path::PathBuf;
 use std::string::String;
-use clap::App;
-use clap::Arg;
-use std::str;
-use rand::{ Rng, OsRng };
 
 mod crypt;
+
+#[cfg_attr(rustfmt, rustfmt_skip)]
+static USAGE: &'static str = "
+Usage: pwdacean -h
+       pwdacean -e <target>
+       pwdacean -d <destination>
+
+Options:
+    -h, --help      Display this message.
+    -e, --encrypt   Encrypt a file.
+    -d, --decrypt   Decrypt a file.
+";
+
+#[derive(RustcDecodable, Debug, Deserialize)]
+struct Args {
+    arg_target: Option<String>,
+    arg_destination: Option<String>,
+    flag_encrypt: bool,
+    flag_decrypt: bool,
+    flag_help: bool,
+}
 
 fn main() {
     log4rs::init_file("config/log4rs.yaml", Default::default()).unwrap();
 
-    debug!("booting up");
-
-    let args = App::new("PWDacean").
-        version("v1.0-beta").
-        arg(Arg::with_name("TARGET").
-        required(true).
-        index(1)).
-        get_matches();
-
-    let message = "Hello World!";
-
-    let mut key: [u8; 32] = [0; 32];
-    let mut iv: [u8; 16] = [0; 16];
-
-    // In a real program, the key and iv may be determined
-    // using some other mechanism. If a password is to be used
-    // as a key, an algorithm like PBKDF2, Bcrypt, or Scrypt (all
-    // supported by Rust-Crypto!) would be a good choice to derive
-    // a password. For the purposes of this example, the key and
-    // iv are just random values.
-    let mut rng = OsRng::new().ok().unwrap();
-    rng.fill_bytes(&mut key);
-    rng.fill_bytes(&mut iv);
-
-    let encrypted_data = crypt::encrypt(message.as_bytes(), &key, &iv).ok().unwrap();
-    let decrypted_data = crypt::decrypt(&encrypted_data[..], &key, &iv).ok().unwrap();
-
-    assert!(message.as_bytes() == &decrypted_data[..]);
-    let res = message.as_bytes() == &decrypted_data[..];
-    info!("encrypting and decrypting worked: {:#?}", res);
-    info!("decrypted message: {}", str::from_utf8(&decrypted_data[..]).unwrap());
-
-    let target = args.value_of("TARGET").unwrap();
-    info!("attempting to encrypt {}", target);
-    let as_string: Option<String> = Some(target[..].to_string());
-    let results: (Option<PathBuf>, Option<DiskBasedStorage>) = encrypt_file(as_string);
-
-    match results {
-        (None, None) => info!("Nothing encrypted"),
-        (Some(a), Some(b)) => info!("stored at: {}", b.storage_path),
-        _ => info!("dont care")
+    let args: Args = Docopt::new(USAGE)
+        .and_then(|d| d.deserialize())
+        .unwrap_or_else(|e| e.exit());
+    if args.flag_help {
+        println!("{:?}", args)
     }
+
+
+//    let message = "Hello World!";
+//
+//    let mut key: [u8; 32] = [0; 32];
+//    let mut iv: [u8; 16] = [0; 16];
+//
+//    // In a real program, the key and iv may be determined
+//    // using some other mechanism. If a password is to be used
+//    // as a key, an algorithm like PBKDF2, Bcrypt, or Scrypt (all
+//    // supported by Rust-Crypto!) would be a good choice to derive
+//    // a password. For the purposes of this example, the key and
+//    // iv are just random values.
+//    let mut rng = OsRng::new().ok().unwrap();
+//    rng.fill_bytes(&mut key);
+//    rng.fill_bytes(&mut iv);
+//
+//    let encrypted_data = crypt::encrypt(message.as_bytes(), &key, &iv).ok().unwrap();
+//    let decrypted_data = crypt::decrypt(&encrypted_data[..], &key, &iv).ok().unwrap();
+//
+//    assert!(message.as_bytes() == &decrypted_data[..]);
+//    let res = message.as_bytes() == &decrypted_data[..];
+//    info!("encrypting and decrypting worked: {:#?}", res);
+//    info!("decrypted message: {}", str::from_utf8(&decrypted_data[..]).unwrap());
+
+
+    // Testing self_encrypt
+    let mut chunk_store_dir = env::temp_dir();
+    chunk_store_dir.push("chunk_store_test/");
+    let _ = fs::create_dir(chunk_store_dir.clone());
+    let mut storage =
+        DiskBasedStorage { storage_path: unwrap!(chunk_store_dir.to_str()).to_owned() };
+
+    let mut data_map_file = chunk_store_dir;
+    data_map_file.push("data_map");
+
+    if args.flag_encrypt && args.arg_target.is_some() {
+        encrypt_file(args.arg_target, storage, data_map_file)
+    }
+
+    if args.flag_decrypt && args.arg_destination.is_some() {
+        decrypt_file(args.arg_destination, storage, data_map_file)
+    }
+
 }
 
 fn to_hex(ch: u8) -> String {
@@ -179,31 +205,24 @@ impl Storage for DiskBasedStorage {
     }
 }
 
-fn encrypt_file(target: Option<String>) -> (Option<PathBuf>, Option<DiskBasedStorage>) {
-
-    let mut chunk_store_dir = env::temp_dir();
-    chunk_store_dir.push("chunk_store_test/");
-    let _ = fs::create_dir(chunk_store_dir.clone());
-    let mut storage =
-        DiskBasedStorage { storage_path: unwrap!(chunk_store_dir.to_str()).to_owned() };
-
-    let mut data_map_file = chunk_store_dir;
-    data_map_file.push("data_map");
-
+fn encrypt_file(target: Option<String>, storage: DiskBasedStorage, data_map_file: PathBuf) -> () {
     if let Ok(mut file) = File::open(unwrap!(target.clone())) {
         match file.metadata() {
             Ok(metadata) => {
                 if metadata.len() > self_encryption::MAX_FILE_SIZE as u64 {
-                    return (None, None)
+                    return println!(
+                        "File size too large {} is greater than 1GB",
+                        metadata.len()
+                    );
                 }
             }
-            Err(error) => return (None, None)
+            Err(error) => return println!("{}", error.description().to_string()),
         }
 
         let mut data = Vec::new();
         match file.read_to_end(&mut data) {
             Ok(_) => (),
-            Err(error) => return (None, None)
+            Err(error) => return println!("{}", error.description().to_string()),
         }
 
         let se = SelfEncryptor::new(storage, DataMap::None).expect(
@@ -221,14 +240,13 @@ fn encrypt_file(target: Option<String>) -> (Option<PathBuf>, Option<DiskBasedSto
             Ok(mut file) => {
                 let encoded = unwrap!(serialisation::serialise(&data_map));
                 match file.write_all(&encoded[..]) {
-                    Ok(_) => (Some(data_map_file), Some(storage)),
+                    Ok(_) => println!("Data map written to {:?}", data_map_file),
                     Err(error) => {
                         println!(
                             "Failed to write data map to {:?} - {:?}",
                             data_map_file,
-                            error,
+                            error
                         );
-                        (None, None)
                     }
                 }
             }
@@ -238,16 +256,14 @@ fn encrypt_file(target: Option<String>) -> (Option<PathBuf>, Option<DiskBasedSto
                     data_map_file,
                     error
                 );
-                (None, None)
             }
         }
     } else {
         println!("Failed to open {}", unwrap!(target.clone()));
-        (None, None)
     }
 }
 
-fn decrypt_file(storage: DiskBasedStorage, data_map_file: PathBuf, destination: Option<String>) {
+fn decrypt_file(destination: Option<String>, storage: DiskBasedStorage, data_map_file: PathBuf) -> () {
     if let Ok(mut file) = File::open(data_map_file.clone()) {
         let mut data = Vec::new();
         let _ = unwrap!(file.read_to_end(&mut data));
