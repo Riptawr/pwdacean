@@ -1,120 +1,63 @@
+#![forbid(exceeding_bitshifts, mutable_transmutes, no_mangle_const_items,
+unknown_crate_types)]
+#![deny(bad_style, deprecated, improper_ctypes,
+non_shorthand_field_patterns, overflowing_literals, plugin_as_library,
+private_no_mangle_fns, private_no_mangle_statics, stable_features, unconditional_recursion,
+unknown_lints, unsafe_code, unused_allocation, unused_attributes,
+unused_comparisons, unused_features, unused_parens, while_true)]
+#![warn(trivial_casts, trivial_numeric_casts, unused_import_braces,
+unused_qualifications, unused_results)]
+#![allow(box_pointers, fat_ptr_transmutes, missing_copy_implementations,
+missing_debug_implementations, variant_size_differences, dead_code, unused_variables)]
+
+#![cfg_attr(feature="clippy", feature(plugin))]
+#![cfg_attr(feature="clippy", plugin(clippy))]
+#![cfg_attr(feature="clippy", deny(clippy))]
+
 #[macro_use]
 extern crate log;
 extern crate log4rs;
 extern crate clap;
 extern crate crypto;
 extern crate rand;
+extern crate futures;
+extern crate maidsafe_utilities;
+extern crate rustc_serialize;
+extern crate self_encryption;
+#[macro_use]
+extern crate serde_derive;
+#[macro_use]
+extern crate unwrap;
+
+use futures::{future, Future};
+use maidsafe_utilities::serialisation;
+use self_encryption::{DataMap, SelfEncryptor, Storage, StorageError};
+use std::env;
+use std::error::Error as StdError;
+use std::fmt::{self, Display, Formatter};
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::io::Error as IoError;
+use std::path::PathBuf;
+use std::string::String;
 use clap::App;
+use clap::Arg;
 use std::str;
-
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-use crypto::{ symmetriccipher, buffer, aes, blockmodes };
-use crypto::buffer::{ ReadBuffer, WriteBuffer, BufferResult };
-
 use rand::{ Rng, OsRng };
 
-// Encrypt a buffer with the given key and iv using
-// AES-256/CBC/Pkcs encryption.
-fn encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, symmetriccipher::SymmetricCipherError> {
-
-    // Create an encryptor instance of the best performing
-    // type available for the platform.
-    let mut encryptor = aes::cbc_encryptor(
-        aes::KeySize::KeySize256,
-        key,
-        iv,
-        blockmodes::PkcsPadding);
-
-    // Each encryption operation encrypts some data from
-    // an input buffer into an output buffer. Those buffers
-    // must be instances of RefReaderBuffer and RefWriteBuffer
-    // (respectively) which keep track of how much data has been
-    // read from or written to them.
-    let mut final_result = Vec::<u8>::new();
-    let mut read_buffer = buffer::RefReadBuffer::new(data);
-    let mut buffer = [0; 4096];
-    let mut write_buffer = buffer::RefWriteBuffer::new(&mut buffer);
-
-    // Each encryption operation will "make progress". "Making progress"
-    // is a bit loosely defined, but basically, at the end of each operation
-    // either BufferUnderflow or BufferOverflow will be returned (unless
-    // there was an error). If the return value is BufferUnderflow, it means
-    // that the operation ended while wanting more input data. If the return
-    // value is BufferOverflow, it means that the operation ended because it
-    // needed more space to output data. As long as the next call to the encryption
-    // operation provides the space that was requested (either more input data
-    // or more output space), the operation is guaranteed to get closer to
-    // completing the full operation - ie: "make progress".
-    //
-    // Here, we pass the data to encrypt to the enryptor along with a fixed-size
-    // output buffer. The 'true' flag indicates that the end of the data that
-    // is to be encrypted is included in the input buffer (which is true, since
-    // the input data includes all the data to encrypt). After each call, we copy
-    // any output data to our result Vec. If we get a BufferOverflow, we keep
-    // going in the loop since it means that there is more work to do. We can
-    // complete as soon as we get a BufferUnderflow since the encryptor is telling
-    // us that it stopped processing data due to not having any more data in the
-    // input buffer.
-    loop {
-        let result = encryptor.encrypt(&mut read_buffer, &mut write_buffer, true)?;
-
-        // "write_buffer.take_read_buffer().take_remaining()" means:
-        // from the writable buffer, create a new readable buffer which
-        // contains all data that has been written, and then access all
-        // of that data as a slice.
-        final_result.extend(write_buffer.take_read_buffer().take_remaining().iter().map(|&i| i));
-
-        match result {
-            BufferResult::BufferUnderflow => break,
-            BufferResult::BufferOverflow => { }
-        }
-    }
-
-    Ok(final_result)
-}
-
-// Decrypts a buffer with the given key and iv using
-// AES-256/CBC/Pkcs encryption.
-//
-// This function is very similar to encrypt(), so, please reference
-// comments in that function. In non-example code, if desired, it is possible to
-// share much of the implementation using closures to hide the operation
-// being performed. However, such code would make this example less clear.
-fn decrypt(encrypted_data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, symmetriccipher::SymmetricCipherError> {
-    let mut decryptor = aes::cbc_decryptor(
-        aes::KeySize::KeySize256,
-        key,
-        iv,
-        blockmodes::PkcsPadding);
-
-    let mut final_result = Vec::<u8>::new();
-    let mut read_buffer = buffer::RefReadBuffer::new(encrypted_data);
-    let mut buffer = [0; 4096];
-    let mut write_buffer = buffer::RefWriteBuffer::new(&mut buffer);
-
-    loop {
-        let result = decryptor.decrypt(&mut read_buffer, &mut write_buffer, true)?;
-        final_result.extend(write_buffer.take_read_buffer().take_remaining().iter().map(|&i| i));
-        match result {
-            BufferResult::BufferUnderflow => break,
-            BufferResult::BufferOverflow => { }
-        }
-    }
-
-    Ok(final_result)
-}
+mod crypt;
 
 fn main() {
     log4rs::init_file("config/log4rs.yaml", Default::default()).unwrap();
 
     debug!("booting up");
 
-    // The YAML file is found relative to the current file, similar to how modules are found
-    App::new("PWDacean").version("v1.0-beta").get_matches();
+    let args = App::new("PWDacean").
+        version("v1.0-beta").
+        arg(Arg::with_name("TARGET").
+        required(true).
+        index(1)).
+        get_matches();
 
     let message = "Hello World!";
 
@@ -131,11 +74,209 @@ fn main() {
     rng.fill_bytes(&mut key);
     rng.fill_bytes(&mut iv);
 
-    let encrypted_data = encrypt(message.as_bytes(), &key, &iv).ok().unwrap();
-    let decrypted_data = decrypt(&encrypted_data[..], &key, &iv).ok().unwrap();
+    let encrypted_data = crypt::encrypt(message.as_bytes(), &key, &iv).ok().unwrap();
+    let decrypted_data = crypt::decrypt(&encrypted_data[..], &key, &iv).ok().unwrap();
 
     assert!(message.as_bytes() == &decrypted_data[..]);
     let res = message.as_bytes() == &decrypted_data[..];
     info!("encrypting and decrypting worked: {:#?}", res);
-    info!("decrypted message: {}", str::from_utf8(&decrypted_data[..]).unwrap())
+    info!("decrypted message: {}", str::from_utf8(&decrypted_data[..]).unwrap());
+
+    let target = args.value_of("TARGET").unwrap();
+    info!("attempting to encrypt {}", target);
+    let as_string: Option<String> = Some(target[..].to_string());
+    let results: (Option<PathBuf>, Option<DiskBasedStorage>) = encrypt_file(as_string);
+
+    match results {
+        (None, None) => info!("Nothing encrypted"),
+        (Some(a), Some(b)) => info!("stored at: {}", b.storage_path),
+        _ => info!("dont care")
+    }
+}
+
+fn to_hex(ch: u8) -> String {
+    fmt::format(format_args!("{:02x}", ch))
+}
+
+fn file_name(name: &[u8]) -> String {
+    let mut string = String::new();
+    for ch in name {
+        string.push_str(&to_hex(*ch));
+    }
+    string
+}
+
+#[derive(Debug)]
+struct DiskBasedStorageError {
+    io_error: IoError,
+}
+
+impl Display for DiskBasedStorageError {
+    fn fmt(&self, formatter: &mut Formatter) -> fmt::Result {
+        write!(formatter, "I/O error getting/putting: {}", self.io_error)
+    }
+}
+
+impl StdError for DiskBasedStorageError {
+    fn description(&self) -> &str {
+        "DiskBasedStorage Error"
+    }
+}
+
+impl From<IoError> for DiskBasedStorageError {
+    fn from(error: IoError) -> DiskBasedStorageError {
+        DiskBasedStorageError { io_error: error }
+    }
+}
+
+impl StorageError for DiskBasedStorageError {}
+
+struct DiskBasedStorage {
+    pub storage_path: String,
+}
+
+impl DiskBasedStorage {
+    fn calculate_path(&self, name: &[u8]) -> PathBuf {
+        let mut path = PathBuf::from(self.storage_path.clone());
+        path.push(file_name(name));
+        path
+    }
+}
+
+impl Storage for DiskBasedStorage {
+    type Error = DiskBasedStorageError;
+
+    fn get(&self, name: &[u8]) -> Box<Future<Item = Vec<u8>, Error = DiskBasedStorageError>> {
+        let path = self.calculate_path(name);
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) => return Box::new(future::err(From::from(error))),
+        };
+        let mut data = Vec::new();
+        let result = file.read_to_end(&mut data).map(move |_| data).map_err(
+            From::from,
+        );
+        Box::new(future::result(result))
+    }
+
+    fn put(
+        &mut self,
+        name: Vec<u8>,
+        data: Vec<u8>,
+    ) -> Box<Future<Item = (), Error = DiskBasedStorageError>> {
+        let path = self.calculate_path(&name);
+        let mut file = match File::create(&path) {
+            Ok(file) => file,
+            Err(error) => return Box::new(future::err(From::from(error))),
+        };
+
+        let result = file.write_all(&data[..])
+            .map(|_| {
+                println!("Chunk written to {:?}", path);
+            })
+            .map_err(From::from);
+        Box::new(future::result(result))
+    }
+}
+
+fn encrypt_file(target: Option<String>) -> (Option<PathBuf>, Option<DiskBasedStorage>) {
+
+    let mut chunk_store_dir = env::temp_dir();
+    chunk_store_dir.push("chunk_store_test/");
+    let _ = fs::create_dir(chunk_store_dir.clone());
+    let mut storage =
+        DiskBasedStorage { storage_path: unwrap!(chunk_store_dir.to_str()).to_owned() };
+
+    let mut data_map_file = chunk_store_dir;
+    data_map_file.push("data_map");
+
+    if let Ok(mut file) = File::open(unwrap!(target.clone())) {
+        match file.metadata() {
+            Ok(metadata) => {
+                if metadata.len() > self_encryption::MAX_FILE_SIZE as u64 {
+                    return (None, None)
+                }
+            }
+            Err(error) => return (None, None)
+        }
+
+        let mut data = Vec::new();
+        match file.read_to_end(&mut data) {
+            Ok(_) => (),
+            Err(error) => return (None, None)
+        }
+
+        let se = SelfEncryptor::new(storage, DataMap::None).expect(
+            "Encryptor construction shouldn't fail.",
+        );
+        se.write(&data, 0).wait().expect(
+            "Writing to encryptor shouldn't fail.",
+        );
+        let (data_map, old_storage) = se.close().wait().expect(
+            "Closing encryptor shouldn't fail.",
+        );
+        storage = old_storage;
+
+        match File::create(data_map_file.clone()) {
+            Ok(mut file) => {
+                let encoded = unwrap!(serialisation::serialise(&data_map));
+                match file.write_all(&encoded[..]) {
+                    Ok(_) => (Some(data_map_file), Some(storage)),
+                    Err(error) => {
+                        println!(
+                            "Failed to write data map to {:?} - {:?}",
+                            data_map_file,
+                            error,
+                        );
+                        (None, None)
+                    }
+                }
+            }
+            Err(error) => {
+                println!(
+                    "Failed to create data map at {:?} - {:?}",
+                    data_map_file,
+                    error
+                );
+                (None, None)
+            }
+        }
+    } else {
+        println!("Failed to open {}", unwrap!(target.clone()));
+        (None, None)
+    }
+}
+
+fn decrypt_file(storage: DiskBasedStorage, data_map_file: PathBuf, destination: Option<String>) {
+    if let Ok(mut file) = File::open(data_map_file.clone()) {
+        let mut data = Vec::new();
+        let _ = unwrap!(file.read_to_end(&mut data));
+
+        if let Ok(data_map) = serialisation::deserialise::<DataMap>(&data) {
+            let se = SelfEncryptor::new(storage, data_map).expect(
+                "Encryptor construction shouldn't fail.",
+            );
+            let length = se.len();
+            if let Ok(mut file) = File::create(unwrap!(destination.clone())) {
+                let content = se.read(0, length).wait().expect(
+                    "Reading from encryptor shouldn't fail.",
+                );
+                match file.write_all(&content[..]) {
+                    Err(error) => println!("File write failed - {:?}", error),
+                    Ok(_) => {
+                        println!(
+                            "File decrypted to {:?}",
+                            unwrap!(destination.clone())
+                        )
+                    }
+                };
+            } else {
+                println!("Failed to create {}", unwrap!(destination.clone()));
+            }
+        } else {
+            println!("Failed to parse data map - possible corruption");
+        }
+    } else {
+        println!("Failed to open data map at {:?}", data_map_file);
+    }
 }
