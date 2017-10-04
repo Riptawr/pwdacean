@@ -1,0 +1,11 @@
+[package]
+name = "pwdacean"
+version = "0.1.0"
+authors = ["lxk <lxk@droidcraft.org>"]
+
+[dependencies]
+log = "0.3.8"
+log4rs = "0.7.0"
+clap = "~2.26"
+rust-crypto = "^0.2"
+rand = "0.3.16"
